@@ -31,12 +31,16 @@ xcodebuild -project QuietYou.xcodeproj -scheme QuietYou -configuration Debug bui
 
 ### 3. Configure Code Signing
 
-The project is now configured to use **Automatic** code signing, which works with any Apple ID.
+The project uses **Manual** code signing with a specific Developer ID certificate. You'll need to update the development team to match your Apple ID:
 
-When you first build:
-1. Xcode will prompt you to select a development team
-2. Sign in with your Apple ID if you haven't already (Xcode > Settings > Accounts)
-3. Xcode will automatically create and manage signing certificates for you
+1. Sign in with your Apple ID in Xcode (Xcode > Settings > Accounts)
+2. In Xcode, select the **QuietYou** project in the navigator
+3. For both the **QuietYou** and **QuietYouAgent** targets:
+   - Go to the **Signing & Capabilities** tab
+   - Change the **Team** dropdown to your Apple ID
+   - Xcode will handle the rest of the signing configuration
+
+**Note:** You must use the same Apple ID consistently for all builds to avoid TCC (Transparency, Consent, and Control) issues with the Accessibility API.
 
 ### 4. Build the App
 
@@ -64,7 +68,7 @@ The app **requires** Accessibility permissions to function:
 1. When you first launch the app, it will prompt you for Accessibility permissions
 2. Click "Open System Settings" or manually go to:
    - **System Settings > Privacy & Security > Accessibility**
-3. Enable both **QuietYou** and **QuietYouAgent** if they appear in the list
+3. Enable **QuietYouAgent** in the list (this is the background helper that monitors notifications)
 4. You may need to unlock the settings by clicking the lock icon
 
 Without these permissions, the app cannot detect or close notifications.
@@ -78,20 +82,6 @@ Without these permissions, the app cannot detect or close notifications.
    - Any other notification text that annoys you
 
 Any notification containing your filter text will be closed immediately (usually within a split second).
-
-## Auto-Start at Login (Optional)
-
-To have Quiet You! start automatically when you log in:
-
-### Option 1: System Settings
-1. Go to **System Settings > General > Login Items**
-2. Click the "+" button
-3. Navigate to `/Applications/QuietYou.app` and add it
-
-### Option 2: Command Line
-```bash
-osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/QuietYou.app", hidden:false}'
-```
 
 ## How It Works
 
@@ -109,13 +99,9 @@ You only interact with the main app. It automatically manages the agent in the b
 - Try cleaning the build folder: `⌘⇧K` in Xcode or `xcodebuild clean`
 
 ### Notifications Aren't Being Closed
-- Check that Accessibility permissions are granted for both QuietYou and QuietYouAgent
+- Check that Accessibility permissions are granted for QuietYouAgent
 - Verify your filter text is configured correctly
 - Make sure the app is running (check menu bar for the icon)
-
-### App Not Starting at Login
-- Check **System Settings > General > Login Items** to verify it's listed
-- Make sure the app path is `/Applications/QuietYou.app` (not in DerivedData)
 
 ## Technical Details
 
@@ -126,11 +112,8 @@ The app uses the macOS Accessibility API to:
 
 This approach has minimal CPU and memory impact since it uses event-driven observers rather than polling.
 
-## Changes from Original
+## Notes
 
-This fork includes the following improvements:
-- Changed code signing from Manual to Automatic for easier building
-- Removed hardcoded development team ID
-- Added comprehensive setup documentation
-
-These changes make it much easier for anyone to build and run the app locally without needing specific certificates.
+- The project requires manual team configuration due to TCC requirements for the Accessibility API
+- Always use the same Apple ID for signing to maintain consistent code signatures across builds
+- This is standard practice for macOS apps that use system-level APIs
