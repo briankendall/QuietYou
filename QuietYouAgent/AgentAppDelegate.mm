@@ -190,6 +190,36 @@ AXUIElementRef copyFirstDescendantWithRole(AXUIElementRef parent, CFStringRef ta
     return nullptr;
 }
 
+void appendDescendantsWithRole(CFMutableArrayRef result, AXUIElementRef parent, CFStringRef targetRole, int depth = 0,
+                               CFArrayRef targetSubroles = nullptr) {
+    if (depth > kMaxNotificationTraversalDepth) {
+        return;
+    }
+
+    CFArraySmartRef children = copyUIElementChildren(parent);
+
+    if (!children) {
+        return;
+    }
+
+    for (int i = 0; i < CFArrayGetCount(children); ++i) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+
+        if (elementRoleMatches(child, targetRole) && elementSubroleMatches(child, targetSubroles)) {
+            CFArrayAppendValue(result, child);
+        }
+
+        appendDescendantsWithRole(result, child, targetRole, depth + 1, targetSubroles);
+    }
+}
+
+CFArrayRef copyNotificationGroupsInContainer(AXUIElementRef container) {
+    CFMutableArrayRef result = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    appendDescendantsWithRole(result, container, kAXGroupRole, 0,
+                              (__bridge CFArrayRef)@[@"AXNotificationCenterAlert", @"AXNotificationCenterBanner"]);
+    return result;
+}
+
 bool stringContainsAnySubstringInSet(NSString *string, NSSet<NSString *> *substringSet) {
     for (NSString *substring in substringSet) {
         if ([string rangeOfString:substring options:NSCaseInsensitiveSearch].location != NSNotFound) {
@@ -335,16 +365,16 @@ bool pressCloseControlInSubtree(AXUIElementRef element, int depth = 0) {
 }
 
 void closeAllAnnoyingNotificationsInList(AgentAppDelegate *delegate, AXUIElementRef listGroup) {
-    CFArraySmartRef children = copyUIElementChildren(listGroup);
-    
-    if (!children) {
+    CFArraySmartRef notificationGroups = copyNotificationGroupsInContainer(listGroup);
+
+    if (!notificationGroups) {
         return;
     }
-    
-    delegate.lastChildCount = CFArrayGetCount(children);
-    
-    for(long i = (long)CFArrayGetCount(children) - 1; i >= 0; --i) {
-        AXUIElementRef notificationGroup = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+
+    delegate.lastChildCount = CFArrayGetCount(notificationGroups);
+
+    for(long i = (long)CFArrayGetCount(notificationGroups) - 1; i >= 0; --i) {
+        AXUIElementRef notificationGroup = (AXUIElementRef)CFArrayGetValueAtIndex(notificationGroups, i);
         
         if (!notificationContainsIgnoreText(notificationGroup)) {
             continue;
@@ -413,16 +443,15 @@ void notificationCenterNotificationCreated(AXObserverRef observer, AXUIElementRe
     AgentAppDelegate *delegate = [AgentAppDelegate main];
 
     // Because we're using a kAXLayoutChangedNotification, since there doesn't seem to be any other notification
-    // that lets us know when an element has been added to listGroup, we check to make sure the number of children
-    // in it has increased before we go looking for annoying notifications to close.
+    // that lets us know when an element has been added to listGroup, we count recursively discovered notification
+    // groups and only re-scan when that count increases.
+    CFArraySmartRef notificationGroups = copyNotificationGroupsInContainer(listGroup);
 
-    long childCount;
-    AXError error = AXUIElementGetAttributeValueCount(listGroup, kAXChildrenAttribute, &childCount);
-
-    if (error != kAXErrorSuccess) {
-        NSLog(@"Error: failed to get number of notifications");
+    if (!notificationGroups) {
         return;
     }
+
+    long childCount = CFArrayGetCount(notificationGroups);
 
     if (childCount > delegate.lastChildCount) {
         closeAllAnnoyingNotificationsInList(delegate, listGroup);
