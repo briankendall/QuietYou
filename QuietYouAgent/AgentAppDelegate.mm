@@ -366,11 +366,6 @@ bool pressCloseControlInSubtree(AXUIElementRef element, int depth = 0) {
 
 void closeAllAnnoyingNotificationsInList(AgentAppDelegate *delegate, AXUIElementRef listGroup) {
     CFArraySmartRef notificationGroups = copyNotificationGroupsInContainer(listGroup);
-
-    if (!notificationGroups) {
-        return;
-    }
-
     delegate.lastChildCount = CFArrayGetCount(notificationGroups);
 
     for(long i = (long)CFArrayGetCount(notificationGroups) - 1; i >= 0; --i) {
@@ -446,11 +441,6 @@ void notificationCenterNotificationCreated(AXObserverRef observer, AXUIElementRe
     // that lets us know when an element has been added to listGroup, we count recursively discovered notification
     // groups and only re-scan when that count increases.
     CFArraySmartRef notificationGroups = copyNotificationGroupsInContainer(listGroup);
-
-    if (!notificationGroups) {
-        return;
-    }
-
     long childCount = CFArrayGetCount(notificationGroups);
 
     if (childCount > delegate.lastChildCount) {
