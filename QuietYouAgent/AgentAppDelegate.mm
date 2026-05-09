@@ -16,6 +16,8 @@ AgentAppDelegate *_main = nil;
 - (NSSet<NSString *> *)ignoreStrings;
 @end
 
+static const int kMaxNotificationTraversalDepth = 12;
+
 CFArrayRef copyUIElementChildren(AXUIElementRef parent) {
     CFArrayRef children;
     AXError error = AXUIElementCopyAttributeValue(parent, kAXChildrenAttribute, (const void **)&children);
@@ -113,6 +115,111 @@ AXUIElementRef copyFirstChildWithRole(AXUIElementRef parent, CFStringRef targetR
     return result;
 }
 
+CFStringRef copyElementStringAttribute(AXUIElementRef element, CFStringRef attribute) {
+    CFStringRef value = nullptr;
+    AXError error = AXUIElementCopyAttributeValue(element, attribute, (const void **)&value);
+
+    if (error != kAXErrorSuccess || !value || CFGetTypeID(value) != CFStringGetTypeID()) {
+        if (value) {
+            CFRelease(value);
+        }
+
+        return nullptr;
+    }
+
+    return value;
+}
+
+bool elementRoleMatches(AXUIElementRef element, CFStringRef targetRole) {
+    CFStringSmartRef role = copyElementStringAttribute(element, kAXRoleAttribute);
+    return role && CFStringCompare(role, targetRole, 0) == kCFCompareEqualTo;
+}
+
+bool elementSubroleMatches(AXUIElementRef element, CFArrayRef targetSubroles) {
+    if (!targetSubroles) {
+        return true;
+    }
+
+    CFStringSmartRef subrole = copyElementStringAttribute(element, kAXSubroleAttribute);
+
+    if (!subrole) {
+        return false;
+    }
+
+    for (int i = 0; i < CFArrayGetCount(targetSubroles); ++i) {
+        CFStringRef targetSubrole = (CFStringRef)CFArrayGetValueAtIndex(targetSubroles, i);
+
+        if (CFStringCompare(subrole, targetSubrole, 0) == kCFCompareEqualTo) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+AXUIElementRef copyFirstDescendantWithRole(AXUIElementRef parent, CFStringRef targetRole, int depth = 0,
+                                           CFArrayRef targetSubroles = nullptr) {
+    if (depth > kMaxNotificationTraversalDepth) {
+        return nullptr;
+    }
+
+    CFArraySmartRef children = copyUIElementChildren(parent);
+
+    if (!children) {
+        return nullptr;
+    }
+
+    for (int i = 0; i < CFArrayGetCount(children); ++i) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+
+        if (elementRoleMatches(child, targetRole) && elementSubroleMatches(child, targetSubroles)) {
+            CFRetain(child);
+            return child;
+        }
+    }
+
+    for (int i = 0; i < CFArrayGetCount(children); ++i) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+        AXUIElementRef match = copyFirstDescendantWithRole(child, targetRole, depth + 1, targetSubroles);
+
+        if (match) {
+            return match;
+        }
+    }
+
+    return nullptr;
+}
+
+void appendDescendantsWithRole(CFMutableArrayRef result, AXUIElementRef parent, CFStringRef targetRole, int depth = 0,
+                               CFArrayRef targetSubroles = nullptr) {
+    if (depth > kMaxNotificationTraversalDepth) {
+        return;
+    }
+
+    CFArraySmartRef children = copyUIElementChildren(parent);
+
+    if (!children) {
+        return;
+    }
+
+    for (int i = 0; i < CFArrayGetCount(children); ++i) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+
+        if (elementRoleMatches(child, targetRole) && elementSubroleMatches(child, targetSubroles)) {
+            CFArrayAppendValue(result, child);
+        }
+
+        appendDescendantsWithRole(result, child, targetRole, depth + 1, targetSubroles);
+    }
+}
+
+CFArrayRef copyNotificationGroupsInContainer(AXUIElementRef container) {
+    CFMutableArrayRef result = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+    appendDescendantsWithRole(result, container, kAXGroupRole, 0,
+                              (__bridge CFArrayRef)@[@"AXNotificationCenterAlert", @"AXNotificationCenterBanner"]);
+    return result;
+}
+
 bool stringContainsAnySubstringInSet(NSString *string, NSSet<NSString *> *substringSet) {
     for (NSString *substring in substringSet) {
         if ([string rangeOfString:substring options:NSCaseInsensitiveSearch].location != NSNotFound) {
@@ -123,25 +230,43 @@ bool stringContainsAnySubstringInSet(NSString *string, NSSet<NSString *> *substr
     return NO;
 }
 
-bool notificationContainsIgnoreText(AXUIElementRef notificationGroup)
-{
-    CFArraySmartRef labels = copyChildrenWithRole(notificationGroup, kAXStaticTextRole);
+bool elementStringAttributeContainsIgnoreText(AXUIElementRef element, CFStringRef attribute,
+                                              NSSet<NSString *> *ignoreStrings) {
+    CFStringSmartRef value = copyElementStringAttribute(element, attribute);
 
-    if (!labels) {
+    if (!value) {
         return false;
     }
 
-    for(int i = 0; i < CFArrayGetCount(labels); ++i) {
-        AXUIElementRef label = (AXUIElementRef)CFArrayGetValueAtIndex(labels, i);
-        CFStringSmartRef labelText;
-        AXError error = AXUIElementCopyAttributeValue(label, kAXValueAttribute, (const void **)&labelText);
-        
-        if (error != kAXErrorSuccess || !labelText || CFGetTypeID(labelText) != CFStringGetTypeID()) {
-            NSLog(@"Error: couldn't get the text from a notification's label");
-            continue;
+    return stringContainsAnySubstringInSet((__bridge NSString *)value.item, ignoreStrings);
+}
+
+bool notificationContainsIgnoreText(AXUIElementRef notificationGroup, int depth = 0)
+{
+    if (depth > kMaxNotificationTraversalDepth) {
+        return false;
+    }
+
+    NSSet<NSString *> *ignoreStrings = [[AgentAppDelegate main] ignoreStrings];
+    CFStringRef stringAttributes[] = {kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
+                                      kAXIdentifierAttribute};
+
+    for (CFStringRef attribute : stringAttributes) {
+        if (elementStringAttributeContainsIgnoreText(notificationGroup, attribute, ignoreStrings)) {
+            return true;
         }
-        
-        if (stringContainsAnySubstringInSet((__bridge NSString *)labelText.item, [[AgentAppDelegate main] ignoreStrings])) {  
+    }
+
+    CFArraySmartRef children = copyUIElementChildren(notificationGroup);
+
+    if (!children) {
+        return false;
+    }
+
+    for (int i = 0; i < CFArrayGetCount(children); ++i) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
+
+        if (notificationContainsIgnoreText(child, depth + 1)) {
             return true;
         }
     }
@@ -149,46 +274,111 @@ bool notificationContainsIgnoreText(AXUIElementRef notificationGroup)
     return false;
 }
 
-void closeAllAnnoyingNotificationsInList(AgentAppDelegate *delegate, AXUIElementRef listGroup) {
-    CFArraySmartRef children = copyUIElementChildren(listGroup);
-    
+bool elementCanPerformAction(AXUIElementRef element, CFStringRef targetAction) {
+    CFArraySmartRef actions;
+    AXError error = AXUIElementCopyActionNames(element, (CFArrayRef *)&actions);
+
+    if (error != kAXErrorSuccess || !actions || CFGetTypeID(actions) != CFArrayGetTypeID()) {
+        return false;
+    }
+
+    for (int i = 0; i < CFArrayGetCount(actions); ++i) {
+        CFStringRef action = (CFStringRef)CFArrayGetValueAtIndex(actions, i);
+
+        if (CFStringCompare(action, targetAction, 0) == kCFCompareEqualTo) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool performCloseActionOnElement(AXUIElementRef element) {
+    CFArraySmartRef actions;
+    AXError error = AXUIElementCopyActionNames(element, (CFArrayRef *)&actions);
+
+    if (error != kAXErrorSuccess || !actions || CFGetTypeID(actions) != CFArrayGetTypeID()) {
+        return false;
+    }
+
+    for (int i = 0; i < CFArrayGetCount(actions); ++i) {
+        CFStringRef action = (CFStringRef)CFArrayGetValueAtIndex(actions, i);
+
+        if (CFStringHasPrefix(action, CFSTR("Name:Close")) || CFStringCompare(action, kAXCancelAction, 0) == kCFCompareEqualTo) {
+            AXError performError = AXUIElementPerformAction(element, action);
+
+            if (performError == kAXErrorSuccess) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool elementLooksLikeCloseControl(AXUIElementRef element) {
+    if (elementStringAttributeContainsIgnoreText(element, kAXIdentifierAttribute, [NSSet setWithObject:@"close"])) {
+        return true;
+    }
+
+    if (elementStringAttributeContainsIgnoreText(element, kAXDescriptionAttribute, [NSSet setWithObject:@"close"])) {
+        return true;
+    }
+
+    if (elementStringAttributeContainsIgnoreText(element, kAXTitleAttribute, [NSSet setWithObject:@"close"])) {
+        return true;
+    }
+
+    return false;
+}
+
+bool pressCloseControlInSubtree(AXUIElementRef element, int depth = 0) {
+    if (depth > kMaxNotificationTraversalDepth) {
+        return false;
+    }
+
+    if (performCloseActionOnElement(element)) {
+        return true;
+    }
+
+    if (elementRoleMatches(element, kAXButtonRole) && elementCanPerformAction(element, kAXPressAction) &&
+        elementLooksLikeCloseControl(element)) {
+        AXError error = AXUIElementPerformAction(element, kAXPressAction);
+        return error == kAXErrorSuccess;
+    }
+
+    CFArraySmartRef children = copyUIElementChildren(element);
+
     if (!children) {
-        return;
+        return false;
     }
-    
-    delegate.lastChildCount = CFArrayGetCount(children);
 
-    CFArraySmartRef notificationGroups =
-        copyElementsWithRole(children, kAXGroupRole, (__bridge CFArrayRef)@[@"AXNotificationCenterAlert", @"AXNotificationCenterBanner"]);
+    for (int i = 0; i < CFArrayGetCount(children); ++i) {
+        AXUIElementRef child = (AXUIElementRef)CFArrayGetValueAtIndex(children, i);
 
-    if (!notificationGroups) {
-        return;
+        if (pressCloseControlInSubtree(child, depth + 1)) {
+            return true;
+        }
     }
-    
+
+    return false;
+}
+
+void closeAllAnnoyingNotificationsInList(AgentAppDelegate *delegate, AXUIElementRef listGroup) {
+    CFArraySmartRef notificationGroups = copyNotificationGroupsInContainer(listGroup);
+    delegate.lastChildCount = CFArrayGetCount(notificationGroups);
+
     for(long i = (long)CFArrayGetCount(notificationGroups) - 1; i >= 0; --i) {
-        AXError error;
         AXUIElementRef notificationGroup = (AXUIElementRef)CFArrayGetValueAtIndex(notificationGroups, i);
         
         if (!notificationContainsIgnoreText(notificationGroup)) {
             continue;
         }
-        
-        CFArraySmartRef actions;
-        error = AXUIElementCopyActionNames(notificationGroup, (CFArrayRef *)&actions);
-        
-        if (error != kAXErrorSuccess || !actions || CFGetTypeID(actions) != CFArrayGetTypeID()) {
-            NSLog(@"Error: couldn't get the list of actions for a notification center UI element");
-            continue;
-        }
-        
-        for(int j = 0; j < CFArrayGetCount(actions); ++j) {
-            CFStringRef action = (CFStringRef)CFArrayGetValueAtIndex(actions, j);
-            
-            if (CFStringHasPrefix(action, CFSTR("Name:Close"))) {
-                NSLog(@"Closing annoying notification with index %ld", i);
-                AXUIElementPerformAction(notificationGroup, action);
-                break;
-            }
+
+        if (pressCloseControlInSubtree(notificationGroup)) {
+            NSLog(@"Closing annoying notification with index %ld", i);
+        } else {
+            NSLog(@"Found matching notification text but couldn't find a dismiss control");
         }
     }
 }
@@ -196,26 +386,36 @@ void closeAllAnnoyingNotificationsInList(AgentAppDelegate *delegate, AXUIElement
 AXUIElementRef copyWindowNotificationListGroup(AXUIElementRef window) {
     AXUIElementSmartRef hostingView = copyFirstChildWithRole(window, kAXGroupRole, (__bridge CFArrayRef)@[@"AXHostingView"]);
 
-    if (!hostingView) {
-        NSLog(@"Error: couldn't get AXHostingView UI element in Notification Center window");
-        return nullptr;
+    if (hostingView) {
+        AXUIElementSmartRef scrollArea = copyFirstChildWithRole(hostingView, kAXScrollAreaRole);
+
+        if (scrollArea) {
+            AXUIElementRef result =
+                copyFirstChildWithRole(scrollArea, CFSTR("AXOpaqueProviderGroup"), (__bridge CFArrayRef)@[@"AXOpaqueProviderList"]);
+
+            if (result) {
+                return result;
+            }
+        }
     }
 
-    AXUIElementSmartRef scrollArea = copyFirstChildWithRole(hostingView, kAXScrollAreaRole);
+    NSLog(@"Falling back to scroll area notification container");
 
-    if (!scrollArea) {
-        NSLog(@"Error: couldn't get scroll area in Notification Center window");
-        return nullptr;
+    AXUIElementRef descendantScrollArea = copyFirstDescendantWithRole(window, kAXScrollAreaRole);
+
+    if (descendantScrollArea) {
+        return descendantScrollArea;
     }
 
-    AXUIElementRef result =
-        copyFirstChildWithRole(scrollArea, CFSTR("AXOpaqueProviderGroup"), (__bridge CFArrayRef)@[@"AXOpaqueProviderList"]);
+    AXUIElementRef descendantLegacyList =
+        copyFirstDescendantWithRole(window, CFSTR("AXOpaqueProviderGroup"), 0, (__bridge CFArrayRef)@[@"AXOpaqueProviderList"]);
 
-    if (!result) {
-        NSLog(@"Error: couldn't get AXOpaqueProviderList UI element in Notification Center window");
+    if (descendantLegacyList) {
+        return descendantLegacyList;
     }
 
-    return result;
+    NSLog(@"Error: couldn't find a notification list container in Notification Center window");
+    return nullptr;
 }
 
 AXUIElementRef copyNotificationCenterWindow(AXUIElementRef notificationCenterElement) {
@@ -238,16 +438,10 @@ void notificationCenterNotificationCreated(AXObserverRef observer, AXUIElementRe
     AgentAppDelegate *delegate = [AgentAppDelegate main];
 
     // Because we're using a kAXLayoutChangedNotification, since there doesn't seem to be any other notification
-    // that lets us know when an element has been added to listGroup, we check to make sure the number of children
-    // in it has increased before we go looking for annoying notifications to close.
-
-    long childCount;
-    AXError error = AXUIElementGetAttributeValueCount(listGroup, kAXChildrenAttribute, &childCount);
-
-    if (error != kAXErrorSuccess) {
-        NSLog(@"Error: failed to get number of notifications");
-        return;
-    }
+    // that lets us know when an element has been added to listGroup, we count recursively discovered notification
+    // groups and only re-scan when that count increases.
+    CFArraySmartRef notificationGroups = copyNotificationGroupsInContainer(listGroup);
+    long childCount = CFArrayGetCount(notificationGroups);
 
     if (childCount > delegate.lastChildCount) {
         closeAllAnnoyingNotificationsInList(delegate, listGroup);
