@@ -216,7 +216,7 @@ void appendDescendantsWithRole(CFMutableArrayRef result, AXUIElementRef parent, 
 CFArrayRef copyNotificationGroupsInContainer(AXUIElementRef container) {
     CFMutableArrayRef result = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
     appendDescendantsWithRole(result, container, kAXGroupRole, 0,
-                              (__bridge CFArrayRef)@[@"AXNotificationCenterAlert", @"AXNotificationCenterBanner"]);
+                              (__bridge CFArrayRef)@[@"AXNotificationCenterAlert", @"AXNotificationCenterBanner", @"AXNotificationCenterAlertStack"]);
     return result;
 }
 
@@ -364,6 +364,51 @@ bool pressCloseControlInSubtree(AXUIElementRef element, int depth = 0) {
     return false;
 }
 
+bool sendCloseAction(AXUIElementRef element)
+{
+    CFArraySmartRef names;
+    AXError error = AXUIElementCopyActionNames(element, &names);
+    
+    if (error != kAXErrorSuccess || !names || CFGetTypeID(names) != CFArrayGetTypeID()) {
+        return false;
+    }
+    
+    CFStringRef targetAction = nullptr;
+    
+    // This is a bit of a hack, but unfortunately Apple just doesn't seem to be
+    // able to use their own Accessibility framework correctly and leaves us no
+    // choice! Rather than having a non-localized name like "AXClose", the
+    // actions on the notification groups have strange names in the form of:
+    // "Name:XYZ\nTarget:0x0\nSelector:(null)"
+    // Lord knows why. And the names are localized, so even if we parse the
+    // string, we're not guaranteed to get a name we recognize. The only thing
+    // we can use is that the action for closing the notification consistently
+    // does seem to be the last one, and this holds true at least up through
+    // macOS Tahoe. So we're going to rely on that pattern and hope we get the
+    // right action.
+    
+    for(long i = 0; i < CFArrayGetCount(names); ++i) {
+        CFStringRef action = (CFStringRef)CFArrayGetValueAtIndex(names, i);
+        
+        if (CFStringHasPrefix(action, CFSTR("Name:"))) {
+            targetAction = action;
+        }
+    }
+    
+    if (!targetAction) {
+        return false;
+    }
+    
+    error = AXUIElementPerformAction(element, targetAction);
+    
+    if (error != kAXErrorSuccess) {
+        NSLog(@"Failed to perform action '%@' with error code: %d", targetAction, error);
+        return false;
+    }
+    
+    return true;
+}
+
 void closeAllAnnoyingNotificationsInList(AgentAppDelegate *delegate, AXUIElementRef listGroup) {
     CFArraySmartRef notificationGroups = copyNotificationGroupsInContainer(listGroup);
     delegate.lastChildCount = CFArrayGetCount(notificationGroups);
@@ -377,9 +422,16 @@ void closeAllAnnoyingNotificationsInList(AgentAppDelegate *delegate, AXUIElement
 
         if (pressCloseControlInSubtree(notificationGroup)) {
             NSLog(@"Closing annoying notification with index %ld", i);
-        } else {
-            NSLog(@"Found matching notification text but couldn't find a dismiss control");
+            continue;
         }
+        
+        // Try performing an UI element action to close it -- works better on groups
+        if (sendCloseAction(notificationGroup)) {
+            NSLog(@"Closing annoying notification with index %ld (using close action)", i);
+            continue;
+        }
+        
+        NSLog(@"Found matching notification text but couldn't dismiss it");
     }
 }
 
